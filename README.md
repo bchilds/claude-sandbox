@@ -21,6 +21,18 @@ Your repo must be a git repository.
 
 ---
 
+## Setup
+
+Copy the example hosts file:
+
+```bash
+cp allowed-hosts.conf.example allowed-hosts.conf
+```
+
+Edit `allowed-hosts.conf` to add any additional hosts your project needs.
+
+---
+
 ## First run (copy mode)
 
 Copy mode is the default — creates a git worktree so your original repo stays untouched.
@@ -39,6 +51,62 @@ What happens:
 2. Spins up a Docker sandbox with only whitelisted hosts (Bedrock, STS)
 3. Injects AWS credentials as env vars
 4. Runs `claude --dangerously-skip-permissions` inside the sandbox
+
+---
+
+## Example: develop a minor feature
+
+Walk-through of a realistic session against a pretend `test-repo`.
+
+### 1. Launch with a prompt
+
+```bash
+claude-sandbox -p "Add a /healthcheck endpoint that returns { status: 'ok' }" ~/projects/test-repo
+```
+
+This creates a worktree, spins up the sandbox, and drops Claude straight into the task.
+
+### 2. What Claude does (inside the sandbox)
+
+- Reads the project structure and existing routes
+- Adds `GET /healthcheck` with a JSON response
+- Writes a test, runs it, iterates until green
+- Commits to the `sandbox/<timestamp>` branch
+
+You can watch progress in real time — the sandbox is interactive.
+
+### 3. Review the changes
+
+After Claude exits (or you `ctrl-c`), the script prints review commands:
+
+```bash
+git -C /tmp/claude-worktrees/test-repo-12345 log --oneline
+git -C /tmp/claude-worktrees/test-repo-12345 diff main..HEAD
+```
+
+### 4. Merge or discard
+
+```bash
+# accept
+cd ~/projects/test-repo && git merge sandbox/20260228-143000
+
+# reject
+git -C ~/projects/test-repo worktree remove /tmp/claude-worktrees/test-repo-12345
+git -C ~/projects/test-repo branch -D sandbox/20260228-143000
+```
+
+### Variations
+
+```bash
+# direct mode — no worktree, branches in-place
+claude-sandbox -m direct -p "Fix the off-by-one in pagination" ~/projects/test-repo
+
+# auto-cleanup — sandbox + worktree removed on exit
+claude-sandbox --destroy -p "Upgrade Express to v5" ~/projects/test-repo
+
+# dry run first to verify setup
+claude-sandbox --dry-run ~/projects/test-repo
+```
 
 ---
 
@@ -124,7 +192,7 @@ Output prefixed with `[dry-run]` — useful for verifying setup before committin
 
 ## Customizing allowed hosts
 
-Edit `allowed-hosts.conf` to control network access inside the sandbox:
+Edit your local `allowed-hosts.conf` (copied from `allowed-hosts.conf.example`) to control network access inside the sandbox:
 
 ```conf
 # format: <host> [bypass]
@@ -148,4 +216,4 @@ Hosts without `bypass` go through the Docker sandbox proxy. The default policy i
 | `AWS_ACCESS_KEY_ID not set` | SSO session expired — re-run `aws sso login --profile claude` |
 | `<repo> is not a git repository` | Target path must be a git repo (`git init` first) |
 | Network timeout inside sandbox | Host not in `allowed-hosts.conf` — add it and recreate the sandbox |
-| `Missing allowed-hosts.conf` | File must exist alongside `claude-sandbox.sh` |
+| `Missing allowed-hosts.conf` | Run `cp allowed-hosts.conf.example allowed-hosts.conf` (see [Setup](#setup)) |

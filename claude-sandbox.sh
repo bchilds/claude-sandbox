@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKTREE_BASE="/tmp/claude-worktrees"
 SANDBOX_IMAGE="claude"
+SESSIONS_DIR="$HOME/.claude-sandbox/sessions"
 
 # Defaults
 MODE="copy"
@@ -21,7 +22,12 @@ warn() { echo "WARN: $*" >&2; }
 
 usage() {
   cat <<'EOF'
-Usage: claude-sandbox [OPTIONS] <repo-path> [-- <claude-args>]
+Usage: claude-sandbox [OPTIONS] [repo-path] [-- <claude-args>]
+       claude-sandbox list [repo-path | --all]
+       claude-sandbox accept <name>
+       claude-sandbox reject <name>
+       claude-sandbox resume <name> [-- <claude-args>]
+       claude-sandbox cleanup <name>
 
 Run Claude Code in an isolated Docker sandbox with strict network whitelisting.
 
@@ -32,6 +38,13 @@ Options:
   --destroy                Auto-remove sandbox + worktree on exit
   --dry-run                Print commands without executing
   -h, --help               Show this help
+
+Subcommands:
+  list [path|--all]        List sandbox sessions (default: filter by cwd repo)
+  accept <name>            Merge sandbox branch into base branch and clean up
+  reject <name>            Delete sandbox branch and clean up
+  resume <name>            Re-enter sandbox with fresh AWS credentials
+  cleanup <name>           Remove docker sandbox + session metadata only
 EOF
   exit 0
 }
@@ -43,6 +56,206 @@ run_cmd() {
     "$@"
   fi
 }
+
+# ── Session helpers ──────────────────────────────────────────────────────────
+
+save_session() {
+  mkdir -p "$SESSIONS_DIR"
+  cat > "$SESSIONS_DIR/${NAME}.env" <<SESS
+NAME="$NAME"
+REPO_PATH="$REPO_PATH"
+WORKSPACE="$WORKSPACE"
+CONTAINER_WORKSPACE="$CONTAINER_WORKSPACE"
+BRANCH_NAME="$BRANCH_NAME"
+BASE_BRANCH="$BASE_BRANCH"
+MODE="$MODE"
+WORKTREE_PATH="${WORKTREE_PATH:-}"
+CREATED_AT="$CREATED_AT"
+SESS
+}
+
+load_session() {
+  local name="$1"
+  local f="$SESSIONS_DIR/${name}.env"
+  [[ -f "$f" ]] || die "No session found: $name"
+  # shellcheck disable=SC1090
+  source "$f"
+}
+
+remove_session() {
+  rm -f "$SESSIONS_DIR/${1}.env"
+}
+
+remove_docker_sandbox() {
+  docker sandbox rm "$1" 2>/dev/null || true
+}
+
+remove_clone() {
+  local clone_path="$1"
+  rm -rf "$clone_path"
+}
+
+# ── Subcommands ──────────────────────────────────────────────────────────────
+
+cmd_list() {
+  local filter_repo=""
+  local show_all=false
+
+  if [[ "${1:-}" == "--all" ]]; then
+    show_all=true
+  elif [[ -n "${1:-}" ]]; then
+    filter_repo="$(cd "$1" && git rev-parse --show-toplevel 2>/dev/null)" \
+      || die "$1 is not inside a git repository"
+  else
+    filter_repo="$(git rev-parse --show-toplevel 2>/dev/null)" || true
+  fi
+
+  mkdir -p "$SESSIONS_DIR"
+  local files=("$SESSIONS_DIR"/*.env)
+  if [[ ! -f "${files[0]:-}" ]]; then
+    echo "No sandbox sessions found."
+    return 0
+  fi
+
+  # Grab docker sandbox status once
+  local docker_json
+  docker_json="$(docker sandbox ls --json 2>/dev/null || echo '{}')"
+
+  printf "%-35s %-7s %-30s %-20s %-8s\n" "NAME" "MODE" "BRANCH" "CREATED" "DOCKER"
+  printf "%-35s %-7s %-30s %-20s %-8s\n" "---" "----" "------" "-------" "------"
+
+  for f in "${files[@]}"; do
+    [[ -f "$f" ]] || continue
+    (
+      # shellcheck disable=SC1090
+      source "$f"
+      if ! $show_all && [[ -n "$filter_repo" && "$REPO_PATH" != "$filter_repo" ]]; then
+        exit 0
+      fi
+      local docker_status
+      docker_status="$(echo "$docker_json" | python3 -c "
+import sys, json
+vms = json.load(sys.stdin).get('vms', [])
+match = [v for v in vms if v['name'] == '$NAME']
+print(match[0]['status'] if match else 'gone')
+" 2>/dev/null || echo "unknown")"
+      printf "%-35s %-7s %-30s %-20s %-8s\n" \
+        "$NAME" "$MODE" "$BRANCH_NAME" "${CREATED_AT:-?}" "$docker_status"
+    )
+  done
+}
+
+cmd_accept() {
+  local name="${1:?Usage: claude-sandbox accept <name>}"
+  load_session "$name"
+
+  if [[ "$MODE" == "copy" ]]; then
+    git -C "$WORKTREE_PATH" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1 \
+      || die "Branch $BRANCH_NAME not found in clone $WORKTREE_PATH"
+  else
+    git -C "$REPO_PATH" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1 \
+      || die "Branch $BRANCH_NAME not found in $REPO_PATH"
+  fi
+  git -C "$REPO_PATH" rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1 \
+    || die "Base branch $BASE_BRANCH not found in $REPO_PATH"
+
+  if [[ "$MODE" == "copy" ]]; then
+    info "Fetching $BRANCH_NAME from clone..."
+    git -C "$REPO_PATH" fetch "$WORKTREE_PATH" "$BRANCH_NAME"
+  fi
+
+  info "Checking out $BASE_BRANCH..."
+  git -C "$REPO_PATH" checkout "$BASE_BRANCH"
+
+  info "Merging $BRANCH_NAME..."
+  if [[ "$MODE" == "copy" ]]; then
+    local merge_ref="FETCH_HEAD"
+  else
+    local merge_ref="$BRANCH_NAME"
+  fi
+  if ! git -C "$REPO_PATH" merge "$merge_ref" --no-edit; then
+    warn "Merge conflicts detected. Resolve them in $REPO_PATH, then run:"
+    echo "  git -C $REPO_PATH merge --continue"
+    echo "  claude-sandbox cleanup $name"
+    exit 1
+  fi
+
+  info "Merge successful."
+  remove_docker_sandbox "$name"
+
+  if [[ "$MODE" == "copy" ]]; then
+    remove_clone "$WORKTREE_PATH"
+  else
+    git -C "$REPO_PATH" branch -D "$BRANCH_NAME" 2>/dev/null || true
+  fi
+
+  remove_session "$name"
+  info "Session $name cleaned up."
+}
+
+cmd_reject() {
+  local name="${1:?Usage: claude-sandbox reject <name>}"
+  load_session "$name"
+
+  remove_docker_sandbox "$name"
+
+  if [[ "$MODE" == "copy" ]]; then
+    remove_clone "$WORKTREE_PATH"
+  else
+    git -C "$REPO_PATH" checkout "$BASE_BRANCH" 2>/dev/null || true
+    git -C "$REPO_PATH" branch -D "$BRANCH_NAME" 2>/dev/null || true
+  fi
+
+  remove_session "$name"
+  info "Session $name rejected and cleaned up."
+}
+
+cmd_resume() {
+  local name="${1:?Usage: claude-sandbox resume <name>}"
+  shift
+  load_session "$name"
+
+  # Remaining args after name are passed to claude
+  local claude_args=(claude --dangerously-skip-permissions "$@")
+
+  info "Resolving AWS credentials (profile: claude)..."
+  eval "$(aws configure export-credentials --profile claude --format env)" \
+    || die "Failed to resolve AWS credentials. Is 'claude' profile configured and SSO session active?"
+
+  local exec_env=(
+    -e "AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID"
+    -e "AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY"
+    -e "AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN:-}"
+    -e "AWS_REGION=us-east-1"
+    -e "CLAUDE_CODE_USE_BEDROCK=1"
+    -e "ANTHROPIC_MODEL=us.anthropic.claude-opus-4-6-v1"
+  )
+
+  info "Resuming sandbox: $name"
+  docker sandbox exec -it \
+    -w "$CONTAINER_WORKSPACE" \
+    "${exec_env[@]}" \
+    "$name" \
+    "${claude_args[@]}"
+}
+
+cmd_cleanup() {
+  local name="${1:?Usage: claude-sandbox cleanup <name>}"
+  load_session "$name"
+  remove_docker_sandbox "$name"
+  remove_session "$name"
+  info "Docker sandbox + session metadata removed for $name."
+}
+
+# ── Subcommand dispatch ──────────────────────────────────────────────────────
+
+if [[ $# -gt 0 ]]; then
+  case "$1" in
+    help) usage ;;
+    list|accept|reject|resume|cleanup)
+      SUBCMD="$1"; shift; "cmd_$SUBCMD" "$@"; exit $? ;;
+  esac
+fi
 
 # ── Parse args ───────────────────────────────────────────────────────────────
 
@@ -65,7 +278,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$REPO_PATH" ]] || die "Missing required <repo-path>. See --help."
+# Default to current directory if no repo path given
+if [[ -z "$REPO_PATH" ]]; then
+  REPO_PATH="$(pwd)"
+fi
 REPO_PATH="$(cd "$REPO_PATH" && pwd)"
 REPO_NAME="$(basename "$REPO_PATH")"
 
@@ -76,7 +292,7 @@ REPO_NAME="$(basename "$REPO_PATH")"
 info "Checking prerequisites..."
 
 command -v docker >/dev/null 2>&1 || die "docker not found"
-docker sandbox --help >/dev/null 2>&1 || die "docker sandbox not available — requires Docker Desktop with sandbox support"
+docker sandbox ls >/dev/null 2>&1 || die "docker sandbox not available — requires Docker Desktop with sandbox support"
 command -v aws >/dev/null 2>&1 || die "aws CLI not found"
 command -v git >/dev/null 2>&1 || die "git not found"
 
@@ -85,14 +301,17 @@ git -C "$REPO_PATH" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_PATH is no
 
 # ── 2. Resolve workspace ────────────────────────────────────────────────────
 
+BASE_BRANCH="$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD)"
+CREATED_AT="$(date -Iseconds)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
 BRANCH_NAME="sandbox/$TIMESTAMP"
 
 if [[ "$MODE" == "copy" ]]; then
   WORKTREE_PATH="$WORKTREE_BASE/${REPO_NAME}-$$"
   mkdir -p "$WORKTREE_BASE"
-  info "Creating worktree: $WORKTREE_PATH (branch: $BRANCH_NAME)"
-  run_cmd git -C "$REPO_PATH" worktree add "$WORKTREE_PATH" -b "$BRANCH_NAME"
+  info "Cloning repo: $WORKTREE_PATH (branch: $BRANCH_NAME)"
+  run_cmd git clone --local --branch "$BASE_BRANCH" "$REPO_PATH" "$WORKTREE_PATH"
+  run_cmd git -C "$WORKTREE_PATH" checkout -b "$BRANCH_NAME"
   WORKSPACE="$WORKTREE_PATH"
 else
   info "Creating branch in-place: $BRANCH_NAME"
@@ -127,8 +346,25 @@ info "Sandbox name: $NAME"
 
 # ── 5. Create sandbox ───────────────────────────────────────────────────────
 
-info "Creating sandbox..."
+info "Creating sandbox (may take a minute on first run)..."
 run_cmd docker sandbox create --name "$NAME" "$SANDBOX_IMAGE" "$WORKSPACE"
+info "Sandbox created."
+
+# Resolve container-side workspace path (handles WSL2 UNC paths)
+CONTAINER_WORKSPACE=$(
+  docker sandbox ls --json 2>/dev/null \
+    | python3 -c "
+import sys, json
+vms = json.load(sys.stdin).get('vms', [])
+match = [v for v in vms if v['name'] == '$NAME']
+if match:
+    ws = match[0].get('workspaces', [''])[0]
+    print(ws.replace('\\\\', '/'))
+" 2>/dev/null || echo "$WORKSPACE"
+)
+info "Container workspace: $CONTAINER_WORKSPACE"
+
+save_session
 
 # ── 6. Configure network ────────────────────────────────────────────────────
 
@@ -160,6 +396,7 @@ run_cmd docker sandbox network proxy "$NAME" \
   --policy deny \
   "${ALLOW_ARGS[@]}" \
   "${BYPASS_ARGS[@]}"
+info "Network configured."
 
 # ── 7. Build exec command ───────────────────────────────────────────────────
 
@@ -190,13 +427,14 @@ cleanup() {
 
   if $DESTROY; then
     info "Destroying sandbox: $NAME"
-    docker sandbox rm "$NAME" 2>/dev/null || true
+    remove_docker_sandbox "$NAME"
 
     if [[ "$MODE" == "copy" ]]; then
-      info "Removing worktree: $WORKTREE_PATH"
-      git -C "$REPO_PATH" worktree remove "$WORKTREE_PATH" --force 2>/dev/null || true
-      git -C "$REPO_PATH" branch -D "$BRANCH_NAME" 2>/dev/null || true
+      info "Removing clone: $WORKTREE_PATH"
+      remove_clone "$WORKTREE_PATH"
     fi
+
+    remove_session "$NAME"
   else
     echo ""
     echo "╔══════════════════════════════════════════════════════════════╗"
@@ -204,32 +442,23 @@ cleanup() {
     echo "╚══════════════════════════════════════════════════════════════╝"
     echo ""
     echo "Resume sandbox:"
-    echo "  docker sandbox exec -it ${EXEC_ENV[*]} $NAME claude --dangerously-skip-permissions"
+    echo "  claude-sandbox resume $NAME"
     echo ""
 
     if [[ "$MODE" == "copy" ]]; then
       echo "Review changes:"
       echo "  git -C $WORKTREE_PATH log --oneline"
-      echo "  git -C $WORKTREE_PATH diff main..HEAD"
-      echo ""
-      echo "Accept (merge into your repo):"
-      echo "  cd $REPO_PATH && git merge $BRANCH_NAME"
-      echo ""
-      echo "Reject (clean up):"
-      echo "  git -C $REPO_PATH worktree remove $WORKTREE_PATH"
-      echo "  git -C $REPO_PATH branch -D $BRANCH_NAME"
+      echo "  git -C $WORKTREE_PATH diff ${BASE_BRANCH}..HEAD"
     else
       echo "Review changes:"
       echo "  git -C $REPO_PATH log --oneline $BRANCH_NAME"
-      echo "  git -C $REPO_PATH diff main..$BRANCH_NAME"
-      echo ""
-      echo "Reject:"
-      echo "  cd $REPO_PATH && git checkout main && git branch -D $BRANCH_NAME"
+      echo "  git -C $REPO_PATH diff ${BASE_BRANCH}..$BRANCH_NAME"
     fi
 
     echo ""
-    echo "Remove sandbox:"
-    echo "  docker sandbox rm $NAME"
+    echo "Accept:   claude-sandbox accept $NAME"
+    echo "Reject:   claude-sandbox reject $NAME"
+    echo "Cleanup:  claude-sandbox cleanup $NAME"
     echo ""
   fi
 
@@ -244,6 +473,7 @@ info "Launching Claude in sandbox..."
 echo ""
 
 run_cmd docker sandbox exec -it \
+  -w "$CONTAINER_WORKSPACE" \
   "${EXEC_ENV[@]}" \
   "$NAME" \
   "${EXEC_CLAUDE_ARGS[@]}"

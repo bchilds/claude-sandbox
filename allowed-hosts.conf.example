@@ -5,3 +5,5 @@ bedrock-runtime.us-east-2.amazonaws.com bypass
 # AWS STS (credential exchange)
 sts.amazonaws.com bypass
 sts.us-east-1.amazonaws.com bypass
+# npm registry
+registry.npmjs.org
