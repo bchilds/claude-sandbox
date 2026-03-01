@@ -122,7 +122,6 @@ load_session() {
   local name="$1"
   local f="$SESSIONS_DIR/${name}.env"
   [[ -f "$f" ]] || die "No session found: $name"
-  # shellcheck disable=SC1090
   source "$f"
 }
 
@@ -171,7 +170,6 @@ cmd_list() {
   for f in "${files[@]}"; do
     [[ -f "$f" ]] || continue
     (
-      # shellcheck disable=SC1090
       source "$f"
       if ! $show_all && [[ -n "$filter_repo" && "$REPO_PATH" != "$filter_repo" ]]; then
         exit 0
@@ -542,6 +540,24 @@ EXEC_ENV=(
 )
 
 EXEC_CLAUDE_ARGS=(claude --dangerously-skip-permissions)
+
+# Build sandbox-awareness system prompt
+ALLOWED_HOSTS=()
+while IFS= read -r line; do
+  line="${line%%#*}"
+  line="$(echo "$line" | xargs)"
+  [[ -z "$line" ]] && continue
+  ALLOWED_HOSTS+=("${line%% *}")
+done < "$HOSTS_FILE"
+
+SANDBOX_PROMPT="You are running inside a sandboxed Docker container. You do NOT have access to the host filesystem — only the mounted workspace at $CONTAINER_WORKSPACE.
+
+All outbound network traffic is blocked by default. Only the following hosts are reachable:
+$(printf '  - %s\n' "${ALLOWED_HOSTS[@]}")
+
+Do not attempt to access any other hosts or external services."
+
+EXEC_CLAUDE_ARGS+=(--append-system-prompt "$SANDBOX_PROMPT")
 
 if [[ -n "$PROMPT" ]]; then
   EXEC_CLAUDE_ARGS+=(-p "$PROMPT")
