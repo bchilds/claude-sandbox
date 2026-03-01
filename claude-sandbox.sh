@@ -20,6 +20,19 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "=> $*"; }
 warn() { echo "WARN: $*" >&2; }
 
+is_wsl2() {
+  [[ -f /proc/version ]] && grep -qi microsoft /proc/version
+}
+
+sync_to_host() {
+  local sandbox="$1" container_src="$2" host_dst="$3"
+  rm -rf "$host_dst"
+  mkdir -p "$host_dst"
+  docker sandbox exec "$sandbox" \
+    tar -cf - -C "$container_src" . \
+    | tar -xf - -C "$host_dst"
+}
+
 ensure_hosts_conf() {
   local conf="$SCRIPT_DIR/allowed-hosts.conf"
   local example="$SCRIPT_DIR/allowed-hosts.conf.example"
@@ -97,6 +110,7 @@ BRANCH_NAME="$BRANCH_NAME"
 BASE_BRANCH="$BASE_BRANCH"
 MODE="$MODE"
 WORKTREE_PATH="${WORKTREE_PATH:-}"
+VIRTIOFS_WORKSPACE="${VIRTIOFS_WORKSPACE:-}"
 CREATED_AT="$CREATED_AT"
 SESS
 }
@@ -177,6 +191,12 @@ cmd_accept() {
   load_session "$name"
 
   if [[ "$MODE" == "copy" ]]; then
+    # WSL2: sync container-local workspace back to host clone via tar pipe
+    if [[ -n "${VIRTIOFS_WORKSPACE:-}" ]]; then
+      info "Syncing container-local workspace back to host..."
+      sync_to_host "$name" "$CONTAINER_WORKSPACE" "$WORKTREE_PATH"
+    fi
+
     git -C "$WORKTREE_PATH" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1 \
       || die "Branch $BRANCH_NAME not found in clone $WORKTREE_PATH"
 
@@ -225,6 +245,18 @@ cmd_resume() {
   local name="${1:?Usage: claude-sandbox resume <name>}"
   shift
   load_session "$name"
+
+  # WSL2: re-copy workspace if container was restarted and local copy is gone
+  if [[ -n "${VIRTIOFS_WORKSPACE:-}" ]]; then
+    local has_git
+    has_git=$(docker sandbox exec "$name" \
+      bash -c "[[ -d '$CONTAINER_WORKSPACE/.git' ]] && echo yes || echo no" 2>/dev/null || echo "no")
+    if [[ "$has_git" != "yes" ]]; then
+      info "WSL2: re-copying workspace to container-local path..."
+      docker sandbox exec "$name" \
+        bash -c "cp -a '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
+    fi
+  fi
 
   # Remaining args after name are passed to claude
   local claude_args=(claude --dangerously-skip-permissions "$@")
@@ -441,6 +473,17 @@ if match:
 )
 info "Container workspace: $CONTAINER_WORKSPACE"
 
+# WSL2: copy workspace to container-local path to avoid EIO on bind-mount
+VIRTIOFS_WORKSPACE=""
+if is_wsl2 && [[ "$MODE" == "copy" ]]; then
+  info "WSL2 detected — copying workspace to container-local path..."
+  VIRTIOFS_WORKSPACE="$CONTAINER_WORKSPACE"
+  CONTAINER_WORKSPACE="/home/agent/project"
+  docker sandbox exec "$NAME" \
+    bash -c "cp -a '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
+  info "Workspace copied to $CONTAINER_WORKSPACE (bind-mount: $VIRTIOFS_WORKSPACE)"
+fi
+
 save_session
 
 # ── 6. Configure network ────────────────────────────────────────────────────
@@ -501,6 +544,12 @@ fi
 cleanup() {
   local exit_code=$?
   echo ""
+
+  # WSL2: sync container-local workspace back to host clone via tar pipe
+  if ! $DESTROY && [[ -n "${VIRTIOFS_WORKSPACE:-}" ]]; then
+    info "Syncing container-local workspace back to host..."
+    sync_to_host "$NAME" "$CONTAINER_WORKSPACE" "${WORKTREE_PATH:-$WORKSPACE}"
+  fi
 
   if $DESTROY; then
     info "Destroying sandbox: $NAME"
