@@ -20,6 +20,26 @@ die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "=> $*"; }
 warn() { echo "WARN: $*" >&2; }
 
+ensure_hosts_conf() {
+  local conf="$SCRIPT_DIR/allowed-hosts.conf"
+  local example="$SCRIPT_DIR/allowed-hosts.conf.example"
+  [[ -f "$conf" ]] && return
+  [[ -f "$example" ]] || die "No allowed-hosts.conf or allowed-hosts.conf.example found"
+  cp "$example" "$conf"
+  info "Created allowed-hosts.conf from example template"
+}
+
+host_exists() {
+  local file="$1" target="$2"
+  while IFS= read -r line; do
+    local stripped="${line%%#*}"
+    stripped="$(echo "$stripped" | xargs)"
+    [[ -z "$stripped" ]] && continue
+    [[ "${stripped%% *}" == "$target" ]] && return 0
+  done < "$file"
+  return 1
+}
+
 usage() {
   cat <<'EOF'
 Usage: claude-sandbox [OPTIONS] [repo-path] [-- <claude-args>]
@@ -45,6 +65,13 @@ Subcommands:
   reject <name>            Delete sandbox branch and clean up
   resume <name>            Re-enter sandbox with fresh AWS credentials
   cleanup <name>           Remove docker sandbox + session metadata only
+  hosts [list|add|remove]  Manage network allowlist
+
+Host management:
+  hosts list                 Show configured hosts
+  hosts add <host>           Allow host through sandbox proxy
+  hosts add <host> --bypass  Allow + bypass proxy
+  hosts remove <host>        Remove host from allowlist
 EOF
   exit 0
 }
@@ -152,45 +179,29 @@ cmd_accept() {
   if [[ "$MODE" == "copy" ]]; then
     git -C "$WORKTREE_PATH" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1 \
       || die "Branch $BRANCH_NAME not found in clone $WORKTREE_PATH"
+
+    info "Fetching $BRANCH_NAME from clone..."
+    git -C "$REPO_PATH" fetch "$WORKTREE_PATH" "$BRANCH_NAME:$BRANCH_NAME"
+    info "Branch $BRANCH_NAME created in $REPO_PATH"
+
+    remove_clone "$WORKTREE_PATH"
   else
     git -C "$REPO_PATH" rev-parse --verify "$BRANCH_NAME" >/dev/null 2>&1 \
       || die "Branch $BRANCH_NAME not found in $REPO_PATH"
-  fi
-  git -C "$REPO_PATH" rev-parse --verify "$BASE_BRANCH" >/dev/null 2>&1 \
-    || die "Base branch $BASE_BRANCH not found in $REPO_PATH"
-
-  if [[ "$MODE" == "copy" ]]; then
-    info "Fetching $BRANCH_NAME from clone..."
-    git -C "$REPO_PATH" fetch "$WORKTREE_PATH" "$BRANCH_NAME"
+    info "Branch $BRANCH_NAME already in $REPO_PATH"
   fi
 
-  info "Checking out $BASE_BRANCH..."
-  git -C "$REPO_PATH" checkout "$BASE_BRANCH"
-
-  info "Merging $BRANCH_NAME..."
-  if [[ "$MODE" == "copy" ]]; then
-    local merge_ref="FETCH_HEAD"
-  else
-    local merge_ref="$BRANCH_NAME"
-  fi
-  if ! git -C "$REPO_PATH" merge "$merge_ref" --no-edit; then
-    warn "Merge conflicts detected. Resolve them in $REPO_PATH, then run:"
-    echo "  git -C $REPO_PATH merge --continue"
-    echo "  claude-sandbox cleanup $name"
-    exit 1
-  fi
-
-  info "Merge successful."
   remove_docker_sandbox "$name"
-
-  if [[ "$MODE" == "copy" ]]; then
-    remove_clone "$WORKTREE_PATH"
-  else
-    git -C "$REPO_PATH" branch -D "$BRANCH_NAME" 2>/dev/null || true
-  fi
-
   remove_session "$name"
-  info "Session $name cleaned up."
+
+  echo ""
+  echo "Merge when ready:"
+  echo "  git -C $REPO_PATH checkout $BASE_BRANCH"
+  echo "  git -C $REPO_PATH merge $BRANCH_NAME"
+  echo ""
+  echo "Review:"
+  echo "  git -C $REPO_PATH log $BASE_BRANCH..$BRANCH_NAME --oneline"
+  echo "  git -C $REPO_PATH diff $BASE_BRANCH..$BRANCH_NAME"
 }
 
 cmd_reject() {
@@ -247,12 +258,78 @@ cmd_cleanup() {
   info "Docker sandbox + session metadata removed for $name."
 }
 
+cmd_hosts() {
+  local op="${1:-list}"
+  shift 2>/dev/null || true
+  case "$op" in
+    list)   cmd_hosts_list ;;
+    add)    cmd_hosts_add "$@" ;;
+    remove) cmd_hosts_remove "$@" ;;
+    *)      die "Unknown hosts operation: $op (use list, add, remove)" ;;
+  esac
+}
+
+cmd_hosts_list() {
+  ensure_hosts_conf
+  local hosts_file="$SCRIPT_DIR/allowed-hosts.conf"
+  printf "%-50s %s\n" "HOST" "FLAGS"
+  printf "%-50s %s\n" "----" "-----"
+  local count=0
+  while IFS= read -r line; do
+    local stripped="${line%%#*}"
+    stripped="$(echo "$stripped" | xargs)"
+    [[ -z "$stripped" ]] && continue
+    local host="${stripped%% *}"
+    local flags="${stripped#* }"
+    [[ "$flags" == "$host" ]] && flags=""
+    printf "%-50s %s\n" "$host" "$flags"
+    count=$((count + 1))
+  done < "$hosts_file"
+  echo ""
+  info "$count host(s) configured"
+}
+
+cmd_hosts_add() {
+  [[ $# -lt 1 ]] && die "Usage: claude-sandbox hosts add <host> [--bypass]"
+  ensure_hosts_conf
+  local hosts_file="$SCRIPT_DIR/allowed-hosts.conf"
+  local host="$1"
+  local bypass=false
+  [[ "${2:-}" == "--bypass" ]] && bypass=true
+  host_exists "$hosts_file" "$host" && die "Host already exists: $host"
+  local entry="$host"
+  $bypass && entry="$host bypass"
+  echo "$entry" >> "$hosts_file"
+  info "Added: $entry"
+}
+
+cmd_hosts_remove() {
+  [[ $# -lt 1 ]] && die "Usage: claude-sandbox hosts remove <host>"
+  ensure_hosts_conf
+  local hosts_file="$SCRIPT_DIR/allowed-hosts.conf"
+  local host="$1"
+  host_exists "$hosts_file" "$host" || die "Host not found: $host"
+  local tmp
+  tmp="$(mktemp)"
+  while IFS= read -r line; do
+    local stripped="${line%%#*}"
+    stripped="$(echo "$stripped" | xargs)"
+    local line_host="${stripped%% *}"
+    if [[ -n "$stripped" && "$line_host" == "$host" ]]; then
+      continue
+    fi
+    echo "$line" >> "$tmp"
+  done < "$hosts_file"
+  mv "$tmp" "$hosts_file"
+  info "Removed: $host"
+}
+
 # ── Subcommand dispatch ──────────────────────────────────────────────────────
 
 if [[ $# -gt 0 ]]; then
   case "$1" in
     help) usage ;;
-    list|accept|reject|resume|cleanup)
+    list|accept|reject|resume|cleanup|hosts)
       SUBCMD="$1"; shift; "cmd_$SUBCMD" "$@"; exit $? ;;
   esac
 fi
@@ -371,7 +448,7 @@ save_session
 info "Locking down network (deny all, whitelist from allowed-hosts.conf)..."
 
 HOSTS_FILE="$SCRIPT_DIR/allowed-hosts.conf"
-[[ -f "$HOSTS_FILE" ]] || die "Missing $HOSTS_FILE"
+ensure_hosts_conf
 
 ALLOW_ARGS=()
 BYPASS_ARGS=()

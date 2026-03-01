@@ -35,19 +35,19 @@ Edit `allowed-hosts.conf` to add any additional hosts your project needs.
 
 ## First run (copy mode)
 
-Copy mode is the default — creates a git worktree so your original repo stays untouched.
+Copy mode is the default — clones your repo so the original stays untouched.
 
 ```bash
 # 1. Authenticate
 aws sso login --profile claude
 
 # 2. Launch sandbox
-./claude-sandbox.sh ~/projects/my-repo
+./claude-sandbox.sh -n my-feature ~/projects/my-repo
 ```
 
 What happens:
 
-1. Creates a git worktree at `/tmp/claude-worktrees/<repo>-<pid>` on branch `sandbox/<timestamp>`
+1. Clones your repo to `/tmp/claude-worktrees/<repo>-<pid>` on branch `sandbox/<timestamp>`
 2. Spins up a Docker sandbox with only whitelisted hosts (Bedrock, STS)
 3. Injects AWS credentials as env vars
 4. Runs `claude --dangerously-skip-permissions` inside the sandbox
@@ -61,10 +61,10 @@ Walk-through of a realistic session against a pretend `test-repo`.
 ### 1. Launch with a prompt
 
 ```bash
-claude-sandbox -p "Add a /healthcheck endpoint that returns { status: 'ok' }" ~/projects/test-repo
+claude-sandbox -n healthcheck -p "Add a /healthcheck endpoint that returns { status: 'ok' }" ~/projects/test-repo
 ```
 
-This creates a worktree, spins up the sandbox, and drops Claude straight into the task.
+This clones the repo, spins up the sandbox, and drops Claude straight into the task.
 
 ### 2. What Claude does (inside the sandbox)
 
@@ -87,25 +87,21 @@ git -C /tmp/claude-worktrees/test-repo-12345 diff main..HEAD
 ### 4. Merge or discard
 
 ```bash
-# accept
-cd ~/projects/test-repo && git merge sandbox/20260228-143000
-
-# reject
-git -C ~/projects/test-repo worktree remove /tmp/claude-worktrees/test-repo-12345
-git -C ~/projects/test-repo branch -D sandbox/20260228-143000
+claude-sandbox accept healthcheck    # merges into your repo, removes clone
+claude-sandbox reject healthcheck    # removes clone, no changes
 ```
 
 ### Variations
 
 ```bash
-# direct mode — no worktree, branches in-place
-claude-sandbox -m direct -p "Fix the off-by-one in pagination" ~/projects/test-repo
+# direct mode — no clone, branches in-place
+claude-sandbox -n pagination-fix -m direct -p "Fix the off-by-one in pagination" ~/projects/test-repo
 
-# auto-cleanup — sandbox + worktree removed on exit
-claude-sandbox --destroy -p "Upgrade Express to v5" ~/projects/test-repo
+# auto-cleanup — sandbox + clone removed on exit
+claude-sandbox -n express-upgrade --destroy -p "Upgrade Express to v5" ~/projects/test-repo
 
 # dry run first to verify setup
-claude-sandbox --dry-run ~/projects/test-repo
+claude-sandbox -n dry-test --dry-run ~/projects/test-repo
 ```
 
 ---
@@ -115,25 +111,16 @@ claude-sandbox --dry-run ~/projects/test-repo
 On exit (copy mode), you'll see:
 
 ```
+Resume sandbox:
+  claude-sandbox resume my-feature
+
 Review changes:
   git -C /tmp/claude-worktrees/my-repo-12345 log --oneline
   git -C /tmp/claude-worktrees/my-repo-12345 diff main..HEAD
 
-Accept (merge into your repo):
-  cd ~/projects/my-repo && git merge sandbox/20260228-143000
-
-Reject (clean up):
-  git -C ~/projects/my-repo worktree remove /tmp/claude-worktrees/my-repo-12345
-  git -C ~/projects/my-repo branch -D sandbox/20260228-143000
-```
-
-You can also resume the sandbox instead of merging immediately:
-
-```bash
-docker sandbox exec -it \
-  -e "AWS_ACCESS_KEY_ID=..." -e "AWS_SECRET_ACCESS_KEY=..." -e "AWS_SESSION_TOKEN=..." \
-  -e "AWS_REGION=us-east-1" -e "CLAUDE_CODE_USE_BEDROCK=1" -e "ANTHROPIC_MODEL=us.anthropic.claude-opus-4-6-v1" \
-  claude-my-repo-12345 claude --dangerously-skip-permissions
+Accept:   claude-sandbox accept my-feature
+Reject:   claude-sandbox reject my-feature
+Cleanup:  claude-sandbox cleanup my-feature
 ```
 
 ---
@@ -142,24 +129,24 @@ docker sandbox exec -it \
 
 ### Direct mode
 
-Works in-place on your repo (creates a branch, no worktree):
+Works in-place on your repo (creates a branch, no clone):
 
 ```bash
-./claude-sandbox.sh -m direct ~/projects/my-repo
+./claude-sandbox.sh -n my-refactor -m direct ~/projects/my-repo
 ```
 
 ### Auto-destroy on exit
 
-Removes the sandbox container and worktree/branch automatically:
+Removes the sandbox container and clone/branch automatically:
 
 ```bash
-./claude-sandbox.sh --destroy ~/projects/my-repo
+./claude-sandbox.sh -n throwaway --destroy ~/projects/my-repo
 ```
 
 ### Pass a prompt
 
 ```bash
-./claude-sandbox.sh -p "Refactor auth module to use JWT" ~/projects/my-repo
+./claude-sandbox.sh -n jwt-refactor -p "Refactor auth module to use JWT" ~/projects/my-repo
 ```
 
 ### Extra claude args
@@ -167,13 +154,7 @@ Removes the sandbox container and worktree/branch automatically:
 Everything after `--` is forwarded to `claude`:
 
 ```bash
-./claude-sandbox.sh ~/projects/my-repo -- --model us.anthropic.claude-sonnet-4-6-v1
-```
-
-### Custom sandbox name
-
-```bash
-./claude-sandbox.sh -n my-sandbox ~/projects/my-repo
+./claude-sandbox.sh -n sonnet-test ~/projects/my-repo -- --model us.anthropic.claude-sonnet-4-6-v1
 ```
 
 ---
