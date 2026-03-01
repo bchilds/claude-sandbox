@@ -36,18 +36,19 @@ Edit `allowed-hosts.conf` to add any additional hosts your project needs.
 ## First run (copy mode)
 
 Copy mode is the default — clones your repo so the original stays untouched.
+Run from inside your repo (or pass a path as the last argument).
 
 ```bash
 # 1. Authenticate
 aws sso login --profile claude
 
-# 2. Launch sandbox
-./claude-sandbox.sh -n my-feature ~/projects/my-repo
+# 2. Launch sandbox (from inside your repo)
+claude-sandbox -n my-feature
 ```
 
 What happens:
 
-1. Clones your repo to `/tmp/claude-worktrees/<repo>-<pid>` on branch `sandbox/<timestamp>`
+1. Clones your repo to `/tmp/claude-worktrees/<repo>-<pid>` on branch `sandbox/my-feature`
 2. Spins up a Docker sandbox with only whitelisted hosts (Bedrock, STS)
 3. Injects AWS credentials as env vars
 4. Runs `claude --dangerously-skip-permissions` inside the sandbox
@@ -56,12 +57,12 @@ What happens:
 
 ## Example: develop a minor feature
 
-Walk-through of a realistic session against a pretend `test-repo`.
+Walk-through of a realistic session.
 
 ### 1. Launch with a prompt
 
 ```bash
-claude-sandbox -n healthcheck -p "Add a /healthcheck endpoint that returns { status: 'ok' }" ~/projects/test-repo
+claude-sandbox -n healthcheck -p "Add a /healthcheck endpoint that returns { status: 'ok' }"
 ```
 
 This clones the repo, spins up the sandbox, and drops Claude straight into the task.
@@ -71,7 +72,7 @@ This clones the repo, spins up the sandbox, and drops Claude straight into the t
 - Reads the project structure and existing routes
 - Adds `GET /healthcheck` with a JSON response
 - Writes a test, runs it, iterates until green
-- Commits to the `sandbox/<timestamp>` branch
+- Commits to the `sandbox/healthcheck` branch
 
 You can watch progress in real time — the sandbox is interactive.
 
@@ -95,13 +96,13 @@ claude-sandbox reject healthcheck    # removes clone, no changes
 
 ```bash
 # direct mode — no clone, branches in-place
-claude-sandbox -n pagination-fix -m direct -p "Fix the off-by-one in pagination" ~/projects/test-repo
+claude-sandbox -n pagination-fix -m direct -p "Fix the off-by-one in pagination"
 
 # auto-cleanup — sandbox + clone removed on exit
-claude-sandbox -n express-upgrade --destroy -p "Upgrade Express to v5" ~/projects/test-repo
+claude-sandbox -n express-upgrade --destroy -p "Upgrade Express to v5"
 
 # dry run first to verify setup
-claude-sandbox -n dry-test --dry-run ~/projects/test-repo
+claude-sandbox -n dry-test --dry-run
 ```
 
 ---
@@ -132,7 +133,7 @@ Cleanup:  claude-sandbox cleanup my-feature
 Works in-place on your repo (creates a branch, no clone):
 
 ```bash
-./claude-sandbox.sh -n my-refactor -m direct ~/projects/my-repo
+claude-sandbox -n my-refactor -m direct
 ```
 
 ### Auto-destroy on exit
@@ -140,13 +141,21 @@ Works in-place on your repo (creates a branch, no clone):
 Removes the sandbox container and clone/branch automatically:
 
 ```bash
-./claude-sandbox.sh -n throwaway --destroy ~/projects/my-repo
+claude-sandbox -n throwaway --destroy
 ```
 
 ### Pass a prompt
 
 ```bash
-./claude-sandbox.sh -n jwt-refactor -p "Refactor auth module to use JWT" ~/projects/my-repo
+claude-sandbox -n jwt-refactor -p "Refactor auth module to use JWT"
+```
+
+### Custom branch name
+
+Override the default `sandbox/<name|timestamp>` branch:
+
+```bash
+claude-sandbox -n my-feature -b feature/cool-thing
 ```
 
 ### Extra claude args
@@ -154,7 +163,7 @@ Removes the sandbox container and clone/branch automatically:
 Everything after `--` is forwarded to `claude`:
 
 ```bash
-./claude-sandbox.sh -n sonnet-test ~/projects/my-repo -- --model us.anthropic.claude-sonnet-4-6-v1
+claude-sandbox -n sonnet-test -- --model us.anthropic.claude-sonnet-4-6-v1
 ```
 
 ---
@@ -164,7 +173,7 @@ Everything after `--` is forwarded to `claude`:
 Prints every command without executing:
 
 ```bash
-./claude-sandbox.sh --dry-run ~/projects/my-repo
+claude-sandbox --dry-run
 ```
 
 Output prefixed with `[dry-run]` — useful for verifying setup before committing resources.

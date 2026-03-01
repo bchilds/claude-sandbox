@@ -9,6 +9,8 @@ SESSIONS_DIR="$HOME/.claude-sandbox/sessions"
 # Defaults
 MODE="copy"
 NAME=""
+NAME_PROVIDED=false
+BRANCH=""
 PROMPT=""
 DESTROY=false
 DRY_RUN=false
@@ -67,6 +69,7 @@ Run Claude Code in an isolated Docker sandbox with strict network whitelisting.
 Options:
   -m, --mode copy|direct   Workspace mode (default: copy)
   -n, --name <name>        Sandbox name (default: auto-generated)
+  -b, --branch <name>      Branch name (default: sandbox/<name> or sandbox/<timestamp>)
   -p, --prompt <text>      Pass prompt to claude via -p
   --destroy                Auto-remove sandbox + worktree on exit
   --dry-run                Print commands without executing
@@ -373,7 +376,8 @@ REPO_PATH=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -m|--mode)    MODE="$2"; shift 2 ;;
-    -n|--name)    NAME="$2"; shift 2 ;;
+    -n|--name)    NAME="$2"; NAME_PROVIDED=true; shift 2 ;;
+    -b|--branch)  BRANCH="$2"; shift 2 ;;
     -p|--prompt)  PROMPT="$2"; shift 2 ;;
     --destroy)    DESTROY=true; shift ;;
     --dry-run)    DRY_RUN=true; shift ;;
@@ -413,7 +417,15 @@ git -C "$REPO_PATH" rev-parse --git-dir >/dev/null 2>&1 || die "$REPO_PATH is no
 BASE_BRANCH="$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD)"
 CREATED_AT="$(date -Iseconds)"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-BRANCH_NAME="sandbox/$TIMESTAMP"
+
+# Resolve branch name: explicit -b > sandbox/<name> > sandbox/<timestamp>
+if [[ -n "$BRANCH" ]]; then
+  BRANCH_NAME="$BRANCH"
+elif $NAME_PROVIDED; then
+  BRANCH_NAME="sandbox/$NAME"
+else
+  BRANCH_NAME="sandbox/$TIMESTAMP"
+fi
 
 if [[ "$MODE" == "copy" ]]; then
   WORKTREE_PATH="$WORKTREE_BASE/${REPO_NAME}-$$"
