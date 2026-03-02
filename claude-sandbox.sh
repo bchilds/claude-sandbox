@@ -179,12 +179,13 @@ cmd_list() {
         exit 0
       fi
       local docker_status
-      docker_status="$(echo "$docker_json" | python3 -c "
-import sys, json
-vms = json.load(sys.stdin).get('vms', [])
-match = [v for v in vms if v['name'] == '$NAME']
-print(match[0]['status'] if match else 'gone')
-" 2>/dev/null || echo "unknown")"
+      docker_status="$(echo "$docker_json" | awk -v name="$NAME" '
+        /"name":/ && index($0, "\"" name "\"") { found=1 }
+        found && /"status":/ {
+          gsub(/.*"status": *"/, ""); gsub(/".*/, ""); print; exit
+        }
+      ')"
+      docker_status="${docker_status:-gone}"
       printf "%-35s %-7s %-30s %-20s %-8s\n" \
         "$NAME" "$MODE" "$BRANCH_NAME" "${CREATED_AT:-?}" "$docker_status"
     )
@@ -520,11 +521,7 @@ info "Sandbox name: $NAME"
 # ── 5. Create sandbox ───────────────────────────────────────────────────────
 
 # Check for existing sandbox with this name
-if docker sandbox ls --json 2>/dev/null | python3 -c "
-import sys, json
-vms = json.load(sys.stdin).get('vms', [])
-sys.exit(0 if any(v['name'] == '$NAME' for v in vms) else 1)
-" 2>/dev/null; then
+if docker sandbox ls --json 2>/dev/null | grep -q "\"name\": \"$NAME\""; then
   if [[ -f "$SESSIONS_DIR/${NAME}.env" ]]; then
     die "Sandbox '$NAME' already exists. Use 'claude-sandbox resume $NAME' or 'claude-sandbox reject $NAME'."
   else
@@ -540,15 +537,15 @@ info "Sandbox created."
 # Resolve container-side workspace path (handles WSL2 UNC paths)
 CONTAINER_WORKSPACE=$(
   docker sandbox ls --json 2>/dev/null \
-    | python3 -c "
-import sys, json
-vms = json.load(sys.stdin).get('vms', [])
-match = [v for v in vms if v['name'] == '$NAME']
-if match:
-    ws = match[0].get('workspaces', [''])[0]
-    print(ws.replace('\\\\', '/'))
-" 2>/dev/null || echo "$WORKSPACE"
+    | awk -v name="$NAME" '
+        /"name":/ && index($0, "\"" name "\"") { found=1 }
+        found && /workspaces/ { ws=1; next }
+        ws && /"/ {
+          gsub(/.*"/, ""); gsub(/".*/, ""); gsub(/\\\\/, "/"); print; exit
+        }
+      '
 )
+[ -z "$CONTAINER_WORKSPACE" ] && CONTAINER_WORKSPACE="$WORKSPACE"
 info "Container workspace: $CONTAINER_WORKSPACE"
 
 # WSL2: copy workspace to container-local path to avoid EIO on bind-mount
