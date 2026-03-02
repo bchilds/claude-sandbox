@@ -255,7 +255,7 @@ cmd_resume() {
     if [[ "$has_git" != "yes" ]]; then
       info "WSL2: re-copying workspace to container-local path..."
       docker sandbox exec "$name" \
-        bash -c "cp -a '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
+        bash -c "cp -aL '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
     fi
   fi
 
@@ -490,7 +490,7 @@ if is_wsl2 && [[ "$MODE" == "copy" ]]; then
   VIRTIOFS_WORKSPACE="$CONTAINER_WORKSPACE"
   CONTAINER_WORKSPACE="/home/agent/project"
   docker sandbox exec "$NAME" \
-    bash -c "cp -a '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
+    bash -c "cp -aL '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
   info "Workspace copied to $CONTAINER_WORKSPACE (bind-mount: $VIRTIOFS_WORKSPACE)"
 fi
 
