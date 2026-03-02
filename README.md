@@ -205,16 +205,16 @@ Run custom setup scripts inside the sandbox **before** network lockdown (so they
 2. Uncomment or add script names (one per line, relative to `sandbox-hooks/`):
 
 ```conf
-install-node-lts.sh
+install-node.sh
 ```
 
 3. Scripts in `sandbox-hooks/` are piped into the container via `bash -s` — no files are copied in.
 
 **Included hooks:**
 
-| Script | What it does |
-|---|---|
-| `install-node-lts.sh` | Installs nvm + Node.js LTS (skips if already present) |
+| Script            | What it does                                          |
+| ----------------- | ----------------------------------------------------- |
+| `install-node.sh` | Installs nvm + Node.js LTS (skips if already present) |
 
 Add your own scripts to `sandbox-hooks/` and list them in `sandbox-hooks.conf` to enable.
 
@@ -242,11 +242,11 @@ claude-sandbox net-lock my-feature      # re-apply allowed-hosts.conf deny polic
 
 ## Troubleshooting
 
-| Error | Fix |
-|---|---|
-| `docker sandbox not available` | Install/update Docker Desktop; enable sandbox feature in settings |
-| `Failed to resolve AWS credentials` | Run `aws sso login --profile claude` |
-| `AWS_ACCESS_KEY_ID not set` | SSO session expired — re-run `aws sso login --profile claude` |
-| `<repo> is not a git repository` | Target path must be a git repo (`git init` first) |
-| Network timeout inside sandbox | Host not in `allowed-hosts.conf` — add it and run `claude-sandbox net-lock <name>` to re-apply |
-| `Missing allowed-hosts.conf` | Run `cp allowed-hosts.conf.example allowed-hosts.conf` (see [Setup](#setup)) |
+| Error                               | Fix                                                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `docker sandbox not available`      | Install/update Docker Desktop; enable sandbox feature in settings                              |
+| `Failed to resolve AWS credentials` | Run `aws sso login --profile claude`                                                           |
+| `AWS_ACCESS_KEY_ID not set`         | SSO session expired — re-run `aws sso login --profile claude`                                  |
+| `<repo> is not a git repository`    | Target path must be a git repo (`git init` first)                                              |
+| Network timeout inside sandbox      | Host not in `allowed-hosts.conf` — add it and run `claude-sandbox net-lock <name>` to re-apply |
+| `Missing allowed-hosts.conf`        | Run `cp allowed-hosts.conf.example allowed-hosts.conf` (see [Setup](#setup))                   |
