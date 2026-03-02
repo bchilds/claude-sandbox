@@ -197,6 +197,49 @@ Hosts without `bypass` go through the Docker sandbox proxy. The default policy i
 
 ---
 
+## Sandbox hooks
+
+Run custom setup scripts inside the sandbox **before** network lockdown (so they have internet access for downloads).
+
+1. Copy the example config: `cp sandbox-hooks.conf.example sandbox-hooks.conf`
+2. Uncomment or add script names (one per line, relative to `sandbox-hooks/`):
+
+```conf
+install-node-lts.sh
+```
+
+3. Scripts in `sandbox-hooks/` are piped into the container via `bash -s` — no files are copied in.
+
+**Included hooks:**
+
+| Script | What it does |
+|---|---|
+| `install-node-lts.sh` | Installs nvm + Node.js LTS (skips if already present) |
+
+Add your own scripts to `sandbox-hooks/` and list them in `sandbox-hooks.conf` to enable.
+
+---
+
+## Toggling network access
+
+Temporarily open the network (e.g. to install packages), then re-lock:
+
+```bash
+claude-sandbox net-open my-feature      # allow all outbound traffic
+docker sandbox exec my-feature npm install   # install whatever you need
+claude-sandbox net-lock my-feature      # re-apply allowed-hosts.conf deny policy
+```
+
+`net-lock` re-reads `allowed-hosts.conf`, so edits made while open take effect immediately.
+
+---
+
+## Notes
+
+- **Interactive shell into a running sandbox:** `docker sandbox exec -it <sandbox-name> bash` (use `docker sandbox ls` to find the name)
+
+---
+
 ## Troubleshooting
 
 | Error | Fix |
@@ -205,5 +248,5 @@ Hosts without `bypass` go through the Docker sandbox proxy. The default policy i
 | `Failed to resolve AWS credentials` | Run `aws sso login --profile claude` |
 | `AWS_ACCESS_KEY_ID not set` | SSO session expired — re-run `aws sso login --profile claude` |
 | `<repo> is not a git repository` | Target path must be a git repo (`git init` first) |
-| Network timeout inside sandbox | Host not in `allowed-hosts.conf` — add it and recreate the sandbox |
+| Network timeout inside sandbox | Host not in `allowed-hosts.conf` — add it and run `claude-sandbox net-lock <name>` to re-apply |
 | `Missing allowed-hosts.conf` | Run `cp allowed-hosts.conf.example allowed-hosts.conf` (see [Setup](#setup)) |

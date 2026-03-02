@@ -63,6 +63,8 @@ Usage: claude-sandbox [OPTIONS] [repo-path] [-- <claude-args>]
        claude-sandbox reject <name>
        claude-sandbox resume <name> [-- <claude-args>]
        claude-sandbox cleanup <name>
+       claude-sandbox net-open <name>
+       claude-sandbox net-lock <name>
 
 Run Claude Code in an isolated Docker sandbox with strict network whitelisting.
 
@@ -81,6 +83,8 @@ Subcommands:
   reject <name>            Delete sandbox branch and clean up
   resume <name>            Re-enter sandbox with fresh AWS credentials
   cleanup <name>           Remove docker sandbox + session metadata only
+  net-open <name>          Unrestrict network (allow all traffic)
+  net-lock <name>          Re-apply network allowlist from allowed-hosts.conf
   hosts [list|add|remove]  Manage network allowlist
 
 Host management:
@@ -294,6 +298,53 @@ cmd_cleanup() {
   info "Docker sandbox + session metadata removed for $name."
 }
 
+build_host_args() {
+  local hosts_file="$SCRIPT_DIR/allowed-hosts.conf"
+  ensure_hosts_conf
+  ALLOW_ARGS=()
+  BYPASS_ARGS=()
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+    host="${line%% *}"
+    flags="${line#* }"
+    ALLOW_ARGS+=(--allow-host "$host")
+    if [[ "$flags" == *bypass* ]]; then
+      BYPASS_ARGS+=(--bypass-host "$host")
+    fi
+  done < "$hosts_file"
+}
+
+cmd_net_open() {
+  local name="${1:?Usage: claude-sandbox net-open <name>}"
+  load_session "$name"
+  info "Opening network for sandbox: $name (allow all)..."
+
+  # Try wildcard bypass first — skips proxy entirely for all hosts
+  if docker sandbox network proxy "$name" --policy allow --bypass-host "*" 2>/dev/null; then
+    info "Network is now UNRESTRICTED for $name (wildcard bypass)."
+  else
+    # Wildcard unsupported; fall back to configured bypass hosts
+    build_host_args
+    docker sandbox network proxy "$name" --policy allow "${BYPASS_ARGS[@]}"
+    info "Network is now UNRESTRICTED for $name (policy allow + configured bypass hosts)."
+  fi
+  warn "All outbound traffic is allowed. Run 'claude-sandbox net-lock $name' to re-apply allowlist."
+}
+
+cmd_net_lock() {
+  local name="${1:?Usage: claude-sandbox net-lock <name>}"
+  load_session "$name"
+  build_host_args
+  info "Locking network for sandbox: $name (deny + allowlist)..."
+  docker sandbox network proxy "$name" \
+    --policy deny \
+    "${ALLOW_ARGS[@]}" \
+    "${BYPASS_ARGS[@]}"
+  info "Network locked for $name."
+}
+
 cmd_hosts() {
   local op="${1:-list}"
   shift 2>/dev/null || true
@@ -365,8 +416,8 @@ cmd_hosts_remove() {
 if [[ $# -gt 0 ]]; then
   case "$1" in
     help) usage ;;
-    list|accept|reject|resume|cleanup|hosts)
-      SUBCMD="$1"; shift; "cmd_$SUBCMD" "$@"; exit $? ;;
+    list|accept|reject|resume|cleanup|net-open|net-lock|hosts)
+      SUBCMD="$1"; shift; "cmd_${SUBCMD//-/_}" "$@"; exit $? ;;
   esac
 fi
 
@@ -518,36 +569,47 @@ save_session
 
 # ── 5b. Install extra packages ────────────────────────────────────────────────
 
-info "Installing git-lfs inside sandbox..."
-docker sandbox exec "$NAME" bash -c \
-  "sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs >/dev/null 2>&1 && git lfs install" \
-  || warn "Failed to install git-lfs (non-fatal)"
+if ! docker sandbox exec "$NAME" which git-lfs >/dev/null 2>&1; then
+  info "Installing git-lfs inside sandbox..."
+  docker sandbox exec "$NAME" bash -c \
+    "sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs >/dev/null 2>&1 && git lfs install" \
+    || warn "Failed to install git-lfs (non-fatal)"
+else
+  docker sandbox exec "$NAME" git lfs install >/dev/null 2>&1
+fi
+
+# ── 5c. Run sandbox hooks ────────────────────────────────────────────────────
+
+HOOKS_CONF="$SCRIPT_DIR/sandbox-hooks.conf"
+HOOKS_DIR="$SCRIPT_DIR/sandbox-hooks"
+
+if [[ -f "$HOOKS_CONF" ]]; then
+  while IFS= read -r line; do
+    line="${line%%#*}"
+    line="$(echo "$line" | xargs)"
+    [[ -z "$line" ]] && continue
+
+    hook="$HOOKS_DIR/$line"
+    if [[ ! -f "$hook" ]]; then
+      warn "Hook script not found: $hook"
+      continue
+    fi
+
+    info "Hook starting: $line"
+    if docker sandbox exec -i "$NAME" bash -s < "$hook"; then
+      info "Hook finished: $line"
+    else
+      warn "Hook failed: $line (non-fatal)"
+    fi
+  done < "$HOOKS_CONF"
+fi
 
 # ── 6. Configure network ────────────────────────────────────────────────────
 
 info "Locking down network (deny all, whitelist from allowed-hosts.conf)..."
 
 HOSTS_FILE="$SCRIPT_DIR/allowed-hosts.conf"
-ensure_hosts_conf
-
-ALLOW_ARGS=()
-BYPASS_ARGS=()
-
-while IFS= read -r line; do
-  # Strip comments and blank lines
-  line="${line%%#*}"
-  line="$(echo "$line" | xargs)"
-  [[ -z "$line" ]] && continue
-
-  host="${line%% *}"
-  flags="${line#* }"
-
-  ALLOW_ARGS+=(--allow-host "$host")
-
-  if [[ "$flags" == *bypass* ]]; then
-    BYPASS_ARGS+=(--bypass-host "$host")
-  fi
-done < "$HOSTS_FILE"
+build_host_args
 
 run_cmd docker sandbox network proxy "$NAME" \
   --policy deny \
