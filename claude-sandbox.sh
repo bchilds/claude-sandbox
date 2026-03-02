@@ -254,8 +254,11 @@ cmd_resume() {
       bash -c "[[ -d '$CONTAINER_WORKSPACE/.git' ]] && echo yes || echo no" 2>/dev/null || echo "no")
     if [[ "$has_git" != "yes" ]]; then
       info "WSL2: re-copying workspace to container-local path..."
-      docker sandbox exec "$name" \
-        bash -c "cp -aL '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
+      docker sandbox exec "$name" mkdir -p "$CONTAINER_WORKSPACE" \
+        || die "Failed to create container workspace directory"
+      tar -chf - -C "$WORKSPACE" . \
+        | docker sandbox exec -i "$name" tar -xf - -C "$CONTAINER_WORKSPACE" \
+        || die "Failed to re-copy workspace into container"
     fi
   fi
 
@@ -503,12 +506,22 @@ if is_wsl2 && [[ "$MODE" == "copy" ]]; then
   info "WSL2 detected — copying workspace to container-local path..."
   VIRTIOFS_WORKSPACE="$CONTAINER_WORKSPACE"
   CONTAINER_WORKSPACE="/home/agent/project"
-  docker sandbox exec "$NAME" \
-    bash -c "cp -aL '$VIRTIOFS_WORKSPACE' '$CONTAINER_WORKSPACE'"
+  docker sandbox exec "$NAME" mkdir -p "$CONTAINER_WORKSPACE" \
+    || die "Failed to create container workspace directory"
+  tar -chf - -C "$WORKSPACE" . \
+    | docker sandbox exec -i "$NAME" tar -xf - -C "$CONTAINER_WORKSPACE" \
+    || die "Failed to copy workspace into container"
   info "Workspace copied to $CONTAINER_WORKSPACE (bind-mount: $VIRTIOFS_WORKSPACE)"
 fi
 
 save_session
+
+# ── 5b. Install extra packages ────────────────────────────────────────────────
+
+info "Installing git-lfs inside sandbox..."
+docker sandbox exec "$NAME" bash -c \
+  "sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs >/dev/null 2>&1 && git lfs install" \
+  || warn "Failed to install git-lfs (non-fatal)"
 
 # ── 6. Configure network ────────────────────────────────────────────────────
 
@@ -586,12 +599,6 @@ fi
 cleanup() {
   local exit_code=$?
   echo ""
-
-  # WSL2: sync container-local workspace back to host clone via tar pipe
-  if ! $DESTROY && [[ -n "${VIRTIOFS_WORKSPACE:-}" ]]; then
-    info "Syncing container-local workspace back to host..."
-    sync_to_host "$NAME" "$CONTAINER_WORKSPACE" "${WORKTREE_PATH:-$WORKSPACE}"
-  fi
 
   if $DESTROY; then
     info "Destroying sandbox: $NAME"
