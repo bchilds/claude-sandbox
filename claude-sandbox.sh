@@ -465,6 +465,20 @@ info "Sandbox name: $NAME"
 
 # ── 5. Create sandbox ───────────────────────────────────────────────────────
 
+# Check for existing sandbox with this name
+if docker sandbox ls --json 2>/dev/null | python3 -c "
+import sys, json
+vms = json.load(sys.stdin).get('vms', [])
+sys.exit(0 if any(v['name'] == '$NAME' for v in vms) else 1)
+" 2>/dev/null; then
+  if [[ -f "$SESSIONS_DIR/${NAME}.env" ]]; then
+    die "Sandbox '$NAME' already exists. Use 'claude-sandbox resume $NAME' or 'claude-sandbox reject $NAME'."
+  else
+    warn "Orphaned sandbox '$NAME' found (no session file). Removing..."
+    remove_docker_sandbox "$NAME"
+  fi
+fi
+
 info "Creating sandbox (may take a minute on first run)..."
 run_cmd docker sandbox create --name "$NAME" "$SANDBOX_IMAGE" "$WORKSPACE"
 info "Sandbox created."
