@@ -15,6 +15,7 @@ PROMPT=""
 DESTROY=false
 DRY_RUN=false
 CLAUDE_ARGS=()
+TEMPLATE=""
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -73,6 +74,7 @@ Options:
   -n, --name <name>        Sandbox name (default: auto-generated)
   -b, --branch <name>      Branch name (default: sandbox/<name> or sandbox/<timestamp>)
   -p, --prompt <text>      Pass prompt to claude via -p
+  -t, --template <image>   Create from snapshot (skips hooks/git-lfs)
   --destroy                Auto-remove sandbox + worktree on exit
   --dry-run                Print commands without executing
   -h, --help               Show this help
@@ -83,6 +85,7 @@ Subcommands:
   reject <name>            Delete sandbox branch and clean up
   resume <name>            Re-enter sandbox with fresh AWS credentials
   cleanup <name>           Remove docker sandbox + session metadata only
+  snapshot <name> [tag]    Save sandbox as reusable template image
   net-open <name>          Unrestrict network (allow all traffic)
   net-lock <name>          Re-apply network allowlist from allowed-hosts.conf
   hosts [list|add|remove]  Manage network allowlist
@@ -417,6 +420,17 @@ cmd_hosts_remove() {
 if [[ $# -gt 0 ]]; then
   case "$1" in
     help) usage ;;
+    snapshot)
+      [[ -z "${2:-}" ]] && die "Usage: claude-sandbox snapshot <name> [tag]"
+      SNAP_NAME="$2"
+      SNAP_TAG="${3:-claude-configured}"
+      docker sandbox ls --json 2>/dev/null | grep -q "\"name\": \"$SNAP_NAME\"" \
+        || die "Sandbox '$SNAP_NAME' not found"
+      info "Saving snapshot of '$SNAP_NAME' as '$SNAP_TAG'..."
+      docker sandbox save "$SNAP_NAME" "$SNAP_TAG"
+      info "Snapshot saved. Use: claude-sandbox -t $SNAP_TAG <repo>"
+      exit 0
+      ;;
     list|accept|reject|resume|cleanup|net-open|net-lock|hosts)
       SUBCMD="$1"; shift; "cmd_${SUBCMD//-/_}" "$@"; exit $? ;;
   esac
@@ -432,6 +446,7 @@ while [[ $# -gt 0 ]]; do
     -n|--name)    NAME="$2"; NAME_PROVIDED=true; shift 2 ;;
     -b|--branch)  BRANCH="$2"; shift 2 ;;
     -p|--prompt)  PROMPT="$2"; shift 2 ;;
+    -t|--template) TEMPLATE="$2"; shift 2 ;;
     --destroy)    DESTROY=true; shift ;;
     --dry-run)    DRY_RUN=true; shift ;;
     -h|--help)    usage ;;
@@ -531,7 +546,11 @@ if docker sandbox ls --json 2>/dev/null | grep -q "\"name\": \"$NAME\""; then
 fi
 
 info "Creating sandbox (may take a minute on first run)..."
-run_cmd docker sandbox create --name "$NAME" "$SANDBOX_IMAGE" "$WORKSPACE"
+if [[ -n "$TEMPLATE" ]]; then
+  run_cmd docker sandbox create --name "$NAME" --template "$TEMPLATE" "$SANDBOX_IMAGE" "$WORKSPACE"
+else
+  run_cmd docker sandbox create --name "$NAME" "$SANDBOX_IMAGE" "$WORKSPACE"
+fi
 info "Sandbox created."
 
 # Resolve container-side workspace path (handles WSL2 UNC paths)
@@ -564,41 +583,49 @@ fi
 
 save_session
 
-# ── 5b. Install extra packages ────────────────────────────────────────────────
+# ── 5b. Install extra packages (skip if using template) ──────────────────────
 
-if ! docker sandbox exec "$NAME" which git-lfs >/dev/null 2>&1; then
-  info "Installing git-lfs inside sandbox..."
-  docker sandbox exec "$NAME" bash -c \
-    "sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs >/dev/null 2>&1 && git lfs install" \
-    || warn "Failed to install git-lfs (non-fatal)"
+if [[ -z "$TEMPLATE" ]]; then
+  if ! docker sandbox exec "$NAME" which git-lfs >/dev/null 2>&1; then
+    info "Installing git-lfs inside sandbox..."
+    docker sandbox exec "$NAME" bash -c \
+      "sudo apt-get update -qq && sudo apt-get install -y -qq git-lfs >/dev/null 2>&1 && git lfs install" \
+      || warn "Failed to install git-lfs (non-fatal)"
+  else
+    docker sandbox exec "$NAME" git lfs install >/dev/null 2>&1
+  fi
 else
-  docker sandbox exec "$NAME" git lfs install >/dev/null 2>&1
+  info "Using template — skipping git-lfs install"
 fi
 
-# ── 5c. Run sandbox hooks ────────────────────────────────────────────────────
+# ── 5c. Run sandbox hooks (skip if using template) ───────────────────────────
 
-HOOKS_CONF="$SCRIPT_DIR/sandbox-hooks.conf"
-HOOKS_DIR="$SCRIPT_DIR/sandbox-hooks"
+if [[ -z "$TEMPLATE" ]]; then
+  HOOKS_CONF="$SCRIPT_DIR/sandbox-hooks.conf"
+  HOOKS_DIR="$SCRIPT_DIR/sandbox-hooks"
 
-if [[ -f "$HOOKS_CONF" ]]; then
-  while IFS= read -r line; do
-    line="${line%%#*}"
-    line="$(echo "$line" | xargs)"
-    [[ -z "$line" ]] && continue
+  if [[ -f "$HOOKS_CONF" ]]; then
+    while IFS= read -r line; do
+      line="${line%%#*}"
+      line="$(echo "$line" | xargs)"
+      [[ -z "$line" ]] && continue
 
-    hook="$HOOKS_DIR/$line"
-    if [[ ! -f "$hook" ]]; then
-      warn "Hook script not found: $hook"
-      continue
-    fi
+      hook="$HOOKS_DIR/$line"
+      if [[ ! -f "$hook" ]]; then
+        warn "Hook script not found: $hook"
+        continue
+      fi
 
-    info "Hook starting: $line"
-    if docker sandbox exec -i "$NAME" bash -s < "$hook"; then
-      info "Hook finished: $line"
-    else
-      warn "Hook failed: $line (non-fatal)"
-    fi
-  done < "$HOOKS_CONF"
+      info "Hook starting: $line"
+      if docker sandbox exec -i "$NAME" bash -s < "$hook"; then
+        info "Hook finished: $line"
+      else
+        warn "Hook failed: $line (non-fatal)"
+      fi
+    done < "$HOOKS_CONF"
+  fi
+else
+  info "Using template — skipping sandbox hooks"
 fi
 
 # ── 6. Configure network ────────────────────────────────────────────────────
